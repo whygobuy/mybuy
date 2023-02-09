@@ -1,92 +1,60 @@
-# Run pipeline whenever a commit or tag is pushed
 trigger:
-  branches:
-    include:
-    - '*'
-  tags:
-    include: 
-    - '*'
+- master
 
-# Run pipeline whenever a PR is raised
-pr:
-  branches:
-    include:
-    - '*'
-
-# Run pipeline everyday. Azure DevOps schedules follow UTC
-# We build master on daily
-schedules:
-- cron: "0 14 * * *" # 00:00 AEST is 14:00 UTC
-  displayName: 'Daily Build'
-  branches:
-    include:
-    - master
+resources:
+- repo: self
 
 variables:
-  BuildConfiguration: release
+  HELM_EXPERIMENTAL_OCI: 1
+  registryName: 'acrgitopsdev'
+  imageName: 'appawebapi'
+  BuildId: '$(Build.BuildId)'
+  tag: '$(Build.BuildId)'
 
 steps:
-- task: DotNetCoreCLI@2
-  displayName: 'dotnet restore'
+- task: AzureCLI@2
   inputs:
-    command: 'restore'
-    projects: '**/*.csproj'
-
-- task: DotNetCoreCLI@2
-  displayName: 'dotnet build'
+    azureSubscription: 'azure-dev-subscription'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: 'az acr login --name $(registryName)'
+    
+- task: AzureCLI@2
   inputs:
-    command: 'build'
-    projects: '**/*.csproj'
-    arguments: '--configuration $(BuildConfiguration) --no-restore'
+    azureSubscription: 'azure-dev-subscription'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: 'az acr build --image $(imageName):$(BuildId) --registry $(registryName) --file Dockerfile .'
+    useGlobalConfig: true
+    workingDirectory: '$(Build.SourcesDirectory)/AppA.WebApi'
 
-- task: DotNetCoreCLI@2
-  displayName: 'dotnet test'
+- task: HelmInstaller@1
   inputs:
-    command: 'test'
-    projects: |
-      tests/**/*.csproj
-      arguments: '--collect "Code coverage"
+    helmVersionToInstall: 'latest'
 
-
-- task: PowerShell@2
-  displayName: 'Check Tag conforms to SemVer'
-  condition: startsWith(variables['build.sourceBranch'], 'refs/tags/') # Only run this step when the trigger event is a tag push
+- task: replacetokens@3
+  inputs:
+    targetFiles: '**/*.yaml'
+    encoding: 'auto'
+    writeBOM: true
+    actionOnMissing: 'warn'
+    keepToken: false
+    tokenPrefix: '#{'
+    tokenSuffix: '}#'
+    useLegacyPattern: false
+    enableTelemetry: true
+       
+- task: Bash@3
   inputs:
     targetType: 'inline'
     script: |
-      $tag = "$(build.sourceBranch)".Replace("refs/tags/","")
-      $regexString = "^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$"
-      $regex = new-object System.Text.RegularExpressions.Regex ($regexString,[System.Text.RegularExpressions.RegexOptions]::MultiLine)
+            helm package --destination $(Build.ArtifactStagingDirectory)/ --version $(BuildId).0.0 ./chart/ 
+    workingDirectory: '$(Build.SourcesDirectory)/AppA.WebApi'
 
-      Write-Host "Pushed tag is $tag"
-      if ($tag -match $regex)
-      {
-        Write-Host "$tag conforms to semantic version; Setting Azure DevOps variable PACKAGE_VERSION..."
-        # Write the tag (e.g. 1.0.0) to an environment variable, so we can use it in the following step
-        Write-Host "##vso[task.setvariable variable=PACKAGE_VERSION]$tag"
-        Write-Host "PACKAGE_VERSION set to $env:PACKAGE_VERSION"
-      }
-      else
-      {
-        # Error out if the tag doesn't conform to semantic versioning standard
-        Write-Error "$tag does not conform to semantic versioning"
-        exit 1
-      }
-
-- task: DotNetCoreCLI@2
-  displayName: 'Pack'
-  condition: and(succeeded(), startsWith(variables['build.sourceBranch'], 'refs/tags/')) # Only run this step when the trigger event is a tag push
+- task: AzureCLI@2
   inputs:
-    command: 'pack'
-    packagesToPack: 'src/**/*.csproj'
-    versioningScheme: 'byEnvVar'
-    versionEnvVar: 'PACKAGE_VERSION'
-
-- task: DotNetCoreCLI@2
-  displayName: 'Push to GitHub Packages'
-  condition: and(succeeded(), startsWith(variables['build.sourceBranch'], 'refs/tags/')) # Only run this step when the trigger event is a tag push
-  inputs:
-    command: 'push'
-    packagesToPush: '$(Build.ArtifactStagingDirectory)/*.nupkg'
-    nuGetFeedType: 'external'
-    publishFeedCredentials: 'GitHub Packages'
+    azureSubscription: 'azure-dev-subscription'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: 'az acr helm push -n $(registryName) $(Build.ArtifactStagingDirectory)/*.tgz'
+    useGlobalConfig: true
